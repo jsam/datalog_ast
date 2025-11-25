@@ -9,7 +9,7 @@ license = "MIT OR Apache-2.0"
 keywords = ["datalog", "ast", "logic-programming", "parser", "database"]
 categories = ["parser-implementations", "data-structures"]
 readme = "README.md"
-rust-version = "1.70"
+rust-version = "1.74"
 
 [dependencies]
 
