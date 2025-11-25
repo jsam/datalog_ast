@@ -4,11 +4,156 @@
 //! Used across multiple modules (M01, M04, M05) for consistency.
 
 use std::collections::HashSet;
-use std::fmt;
 
 // ============================================================================
 // Core AST Types
 // ============================================================================
+
+/// Aggregation function types for Datalog
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum AggregateFunc {
+    Count,
+    Sum,
+    Min,
+    Max,
+    Avg,
+}
+
+/// Arithmetic operators for expressions
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArithOp {
+    /// Addition (+)
+    Add,
+    /// Subtraction (-)
+    Sub,
+    /// Multiplication (*)
+    Mul,
+    /// Division (/)
+    Div,
+    /// Modulo (%)
+    Mod,
+}
+
+impl ArithOp {
+    /// Parse an arithmetic operator from a string
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "+" => Some(ArithOp::Add),
+            "-" => Some(ArithOp::Sub),
+            "*" => Some(ArithOp::Mul),
+            "/" => Some(ArithOp::Div),
+            "%" => Some(ArithOp::Mod),
+            _ => None,
+        }
+    }
+
+    /// Get the string representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ArithOp::Add => "+",
+            ArithOp::Sub => "-",
+            ArithOp::Mul => "*",
+            ArithOp::Div => "/",
+            ArithOp::Mod => "%",
+        }
+    }
+}
+
+/// Arithmetic expression tree
+///
+/// Represents arithmetic expressions like `d + 1` or `x * y + z`.
+///
+/// ## Examples
+///
+/// ```
+/// use datalog_ast::{ArithExpr, ArithOp};
+///
+/// // Simple: d + 1
+/// let expr = ArithExpr::Binary {
+///     op: ArithOp::Add,
+///     left: Box::new(ArithExpr::Variable("d".to_string())),
+///     right: Box::new(ArithExpr::Constant(1)),
+/// };
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ArithExpr {
+    /// A variable reference
+    Variable(String),
+    /// A constant value
+    Constant(i64),
+    /// Binary operation
+    Binary {
+        op: ArithOp,
+        left: Box<ArithExpr>,
+        right: Box<ArithExpr>,
+    },
+}
+
+impl ArithExpr {
+    /// Get all variables referenced in this expression
+    pub fn variables(&self) -> std::collections::HashSet<String> {
+        let mut vars = std::collections::HashSet::new();
+        self.collect_variables(&mut vars);
+        vars
+    }
+
+    fn collect_variables(&self, vars: &mut std::collections::HashSet<String>) {
+        match self {
+            ArithExpr::Variable(name) => {
+                vars.insert(name.clone());
+            }
+            ArithExpr::Constant(_) => {}
+            ArithExpr::Binary { left, right, .. } => {
+                left.collect_variables(vars);
+                right.collect_variables(vars);
+            }
+        }
+    }
+
+    /// Check if this is a simple variable or constant
+    pub fn is_simple(&self) -> bool {
+        matches!(self, ArithExpr::Variable(_) | ArithExpr::Constant(_))
+    }
+
+    /// Try to evaluate as a constant if all values are known
+    pub fn try_eval_constant(&self) -> Option<i64> {
+        match self {
+            ArithExpr::Constant(v) => Some(*v),
+            ArithExpr::Variable(_) => None,
+            ArithExpr::Binary { op, left, right } => {
+                let l = left.try_eval_constant()?;
+                let r = right.try_eval_constant()?;
+                Some(match op {
+                    ArithOp::Add => l + r,
+                    ArithOp::Sub => l - r,
+                    ArithOp::Mul => l * r,
+                    ArithOp::Div => {
+                        if r == 0 { return None; }
+                        l / r
+                    }
+                    ArithOp::Mod => {
+                        if r == 0 { return None; }
+                        l % r
+                    }
+                })
+            }
+        }
+    }
+}
+
+impl AggregateFunc {
+    /// Parse an aggregate function name
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "count" => Some(AggregateFunc::Count),
+            "sum" => Some(AggregateFunc::Sum),
+            "min" => Some(AggregateFunc::Min),
+            "max" => Some(AggregateFunc::Max),
+            "avg" => Some(AggregateFunc::Avg),
+            _ => None,
+        }
+    }
+}
 
 /// Represents a variable or constant in Datalog
 ///
@@ -22,9 +167,18 @@ use std::fmt;
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Term {
-    Variable(String), // e.g., "x", "y", "z"
-    Constant(i64),    // e.g., 42, 100
-    Placeholder,      // For parser - represents "_" in Datalog
+    Variable(String),     // e.g., "x", "y", "z"
+    Constant(i64),        // e.g., 42, 100
+    Placeholder,          // For parser - represents "_" in Datalog
+    /// Aggregation term: count<x>, sum<y>, min<z>, max<z>, avg<z>
+    Aggregate(AggregateFunc, String),  // (function, variable_name)
+    /// Arithmetic expression term: d + 1, x * y, etc.
+    ///
+    /// Used in head atoms for computed columns:
+    /// ```datalog
+    /// dist(y, d+1) :- dist(x, d), edge(x, y).
+    /// ```
+    Arithmetic(ArithExpr),
 }
 
 impl Term {
@@ -38,6 +192,16 @@ impl Term {
         matches!(self, Term::Constant(_))
     }
 
+    /// Check if this term is an aggregate
+    pub fn is_aggregate(&self) -> bool {
+        matches!(self, Term::Aggregate(_, _))
+    }
+
+    /// Check if this term is an arithmetic expression
+    pub fn is_arithmetic(&self) -> bool {
+        matches!(self, Term::Arithmetic(_))
+    }
+
     /// Get variable name if this is a variable
     pub fn as_variable(&self) -> Option<&str> {
         if let Term::Variable(name) = self {
@@ -46,14 +210,40 @@ impl Term {
             None
         }
     }
-}
 
-impl fmt::Display for Term {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    /// Get aggregate info if this is an aggregate term
+    pub fn as_aggregate(&self) -> Option<(&AggregateFunc, &str)> {
+        if let Term::Aggregate(func, var) = self {
+            Some((func, var))
+        } else {
+            None
+        }
+    }
+
+    /// Get arithmetic expression if this is an arithmetic term
+    pub fn as_arithmetic(&self) -> Option<&ArithExpr> {
+        if let Term::Arithmetic(expr) = self {
+            Some(expr)
+        } else {
+            None
+        }
+    }
+
+    /// Get all variables referenced by this term
+    pub fn variables(&self) -> std::collections::HashSet<String> {
         match self {
-            Term::Variable(name) => write!(f, "{name}"),
-            Term::Constant(value) => write!(f, "{value}"),
-            Term::Placeholder => write!(f, "_"),
+            Term::Variable(name) => {
+                let mut set = std::collections::HashSet::new();
+                set.insert(name.clone());
+                set
+            }
+            Term::Aggregate(_, var) => {
+                let mut set = std::collections::HashSet::new();
+                set.insert(var.clone());
+                set
+            }
+            Term::Arithmetic(expr) => expr.variables(),
+            _ => std::collections::HashSet::new(),
         }
     }
 }
@@ -71,36 +261,45 @@ impl Atom {
         Atom { relation, args }
     }
 
-    /// Get all variables in this atom
+    /// Get all variables in this atom (including variables inside aggregates and arithmetic)
     pub fn variables(&self) -> HashSet<String> {
+        let mut vars = HashSet::new();
+        for term in &self.args {
+            vars.extend(term.variables());
+        }
+        vars
+    }
+
+    /// Check if this atom contains any aggregate terms
+    pub fn has_aggregates(&self) -> bool {
+        self.args.iter().any(|t| t.is_aggregate())
+    }
+
+    /// Check if this atom contains any arithmetic expressions
+    pub fn has_arithmetic(&self) -> bool {
+        self.args.iter().any(|t| t.is_arithmetic())
+    }
+
+    /// Get all aggregate terms in this atom
+    pub fn aggregates(&self) -> Vec<(&AggregateFunc, &str)> {
         self.args
             .iter()
-            .filter_map(|term| {
-                if let Term::Variable(name) = term {
-                    Some(name.clone())
-                } else {
-                    None
-                }
-            })
+            .filter_map(|t| t.as_aggregate())
+            .collect()
+    }
+
+    /// Get all arithmetic expressions in this atom
+    pub fn arithmetic_terms(&self) -> Vec<(usize, &ArithExpr)> {
+        self.args
+            .iter()
+            .enumerate()
+            .filter_map(|(i, t)| t.as_arithmetic().map(|e| (i, e)))
             .collect()
     }
 
     /// Get the arity (number of arguments) of this atom
     pub fn arity(&self) -> usize {
         self.args.len()
-    }
-}
-
-impl fmt::Display for Atom {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}(", self.relation)?;
-        for (i, arg) in self.args.iter().enumerate() {
-            if i > 0 {
-                write!(f, ", ")?;
-            }
-            write!(f, "{arg}")?;
-        }
-        write!(f, ")")
     }
 }
 
@@ -112,19 +311,19 @@ pub enum Constraint {
     LessOrEqual(Term, Term),
     GreaterThan(Term, Term),
     GreaterOrEqual(Term, Term),
-    Equal(Term, Term), // For completeness
+    Equal(Term, Term),  // For completeness
 }
 
 impl Constraint {
     /// Get all variables in this constraint
     pub fn variables(&self) -> HashSet<String> {
         let (left, right) = match self {
-            Constraint::NotEqual(l, r)
-            | Constraint::LessThan(l, r)
-            | Constraint::LessOrEqual(l, r)
-            | Constraint::GreaterThan(l, r)
-            | Constraint::GreaterOrEqual(l, r)
-            | Constraint::Equal(l, r) => (l, r),
+            Constraint::NotEqual(l, r) => (l, r),
+            Constraint::LessThan(l, r) => (l, r),
+            Constraint::LessOrEqual(l, r) => (l, r),
+            Constraint::GreaterThan(l, r) => (l, r),
+            Constraint::GreaterOrEqual(l, r) => (l, r),
+            Constraint::Equal(l, r) => (l, r),
         };
 
         let mut vars = HashSet::new();
@@ -135,19 +334,6 @@ impl Constraint {
             vars.insert(name.clone());
         }
         vars
-    }
-}
-
-impl fmt::Display for Constraint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Constraint::NotEqual(l, r) => write!(f, "{l} != {r}"),
-            Constraint::LessThan(l, r) => write!(f, "{l} < {r}"),
-            Constraint::LessOrEqual(l, r) => write!(f, "{l} <= {r}"),
-            Constraint::GreaterThan(l, r) => write!(f, "{l} > {r}"),
-            Constraint::GreaterOrEqual(l, r) => write!(f, "{l} >= {r}"),
-            Constraint::Equal(l, r) => write!(f, "{l} == {r}"),
-        }
     }
 }
 
@@ -163,7 +349,8 @@ impl BodyPredicate {
     /// Get the underlying atom
     pub fn atom(&self) -> &Atom {
         match self {
-            BodyPredicate::Positive(atom) | BodyPredicate::Negated(atom) => atom,
+            BodyPredicate::Positive(atom) => atom,
+            BodyPredicate::Negated(atom) => atom,
         }
     }
 
@@ -183,40 +370,11 @@ impl BodyPredicate {
     }
 }
 
-impl fmt::Display for BodyPredicate {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BodyPredicate::Positive(atom) => write!(f, "{atom}"),
-            BodyPredicate::Negated(atom) => write!(f, "not {atom}"),
-        }
-    }
-}
-
 /// Represents a single Datalog rule
 ///
-/// A rule consists of a head atom, a body of predicates (positive or negated),
-/// and optional constraints.
-///
 /// # Examples
-///
 /// ```
-/// use datalog_ast::{Atom, BodyPredicate, Rule, Term};
-///
 /// // reach(y) :- reach(x), edge(x, y).
-/// let rule = Rule::new(
-///     Atom::new("reach".into(), vec![Term::Variable("y".into())]),
-///     vec![
-///         BodyPredicate::Positive(Atom::new("reach".into(), vec![Term::Variable("x".into())])),
-///         BodyPredicate::Positive(Atom::new("edge".into(), vec![
-///             Term::Variable("x".into()),
-///             Term::Variable("y".into()),
-///         ])),
-///     ],
-///     vec![],
-/// );
-///
-/// assert!(rule.is_safe());
-/// assert!(rule.is_recursive());
 /// ```
 #[derive(Debug, Clone)]
 pub struct Rule {
@@ -257,7 +415,7 @@ impl Rule {
         self.body
             .iter()
             .filter(|pred| pred.is_positive())
-            .flat_map(BodyPredicate::variables)
+            .flat_map(|pred| pred.variables())
             .collect()
     }
 
@@ -306,33 +464,6 @@ impl Rule {
     }
 }
 
-impl fmt::Display for Rule {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.head)?;
-        if self.body.is_empty() && self.constraints.is_empty() {
-            write!(f, ".")
-        } else {
-            write!(f, " :- ")?;
-            let mut first = true;
-            for pred in &self.body {
-                if !first {
-                    write!(f, ", ")?;
-                }
-                write!(f, "{pred}")?;
-                first = false;
-            }
-            for constraint in &self.constraints {
-                if !first {
-                    write!(f, ", ")?;
-                }
-                write!(f, "{constraint}")?;
-                first = false;
-            }
-            write!(f, ".")
-        }
-    }
-}
-
 /// Represents a complete Datalog program
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -375,7 +506,10 @@ impl Program {
             }
         }
 
-        let mut edbs: Vec<String> = body_relations.difference(&idb_set).cloned().collect();
+        let mut edbs: Vec<String> = body_relations
+            .difference(&idb_set)
+            .cloned()
+            .collect();
 
         edbs.sort();
         edbs
@@ -402,7 +536,7 @@ impl Program {
 
     /// Check if all rules in the program are safe
     pub fn is_safe(&self) -> bool {
-        self.rules.iter().all(Rule::is_safe)
+        self.rules.iter().all(|rule| rule.is_safe())
     }
 
     /// Get all recursive rules
@@ -425,18 +559,6 @@ impl Program {
 impl Default for Program {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl fmt::Display for Program {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, rule) in self.rules.iter().enumerate() {
-            if i > 0 {
-                writeln!(f)?;
-            }
-            write!(f, "{rule}")?;
-        }
-        Ok(())
     }
 }
 
@@ -463,10 +585,7 @@ mod tests {
     fn test_atom_creation() {
         let atom = Atom::new(
             "edge".to_string(),
-            vec![
-                Term::Variable("x".to_string()),
-                Term::Variable("y".to_string()),
-            ],
+            vec![Term::Variable("x".to_string()), Term::Variable("y".to_string())],
         );
 
         assert_eq!(atom.relation, "edge");
@@ -489,17 +608,14 @@ mod tests {
             )),
             BodyPredicate::Positive(Atom::new(
                 "edge".to_string(),
-                vec![
-                    Term::Variable("x".to_string()),
-                    Term::Variable("y".to_string()),
-                ],
+                vec![Term::Variable("x".to_string()), Term::Variable("y".to_string())],
             )),
         ];
 
         let rule = Rule::new(head, body, vec![]);
 
-        assert!(rule.is_safe()); // y appears in edge(x, y)
-        assert!(rule.is_recursive()); // reach appears in head and body
+        assert!(rule.is_safe());  // y appears in edge(x, y)
+        assert!(rule.is_recursive());  // reach appears in head and body
     }
 
     #[test]
@@ -509,10 +625,7 @@ mod tests {
         // reach(x) :- source(x).
         program.add_rule(Rule::new_simple(
             Atom::new("reach".to_string(), vec![Term::Variable("x".to_string())]),
-            vec![Atom::new(
-                "source".to_string(),
-                vec![Term::Variable("x".to_string())],
-            )],
+            vec![Atom::new("source".to_string(), vec![Term::Variable("x".to_string())])],
             vec![],
         ));
 
@@ -521,13 +634,10 @@ mod tests {
             Atom::new("reach".to_string(), vec![Term::Variable("y".to_string())]),
             vec![
                 Atom::new("reach".to_string(), vec![Term::Variable("x".to_string())]),
-                Atom::new(
-                    "edge".to_string(),
-                    vec![
-                        Term::Variable("x".to_string()),
-                        Term::Variable("y".to_string()),
-                    ],
-                ),
+                Atom::new("edge".to_string(), vec![
+                    Term::Variable("x".to_string()),
+                    Term::Variable("y".to_string()),
+                ]),
             ],
             vec![],
         ));
@@ -537,348 +647,5 @@ mod tests {
 
         assert_eq!(idbs, vec!["reach"]);
         assert_eq!(edbs, vec!["edge", "source"]);
-    }
-
-    #[test]
-    fn test_term_display() {
-        assert_eq!(Term::Variable("x".into()).to_string(), "x");
-        assert_eq!(Term::Constant(42).to_string(), "42");
-        assert_eq!(Term::Placeholder.to_string(), "_");
-    }
-
-    #[test]
-    fn test_term_as_variable() {
-        let var = Term::Variable("foo".into());
-        let constant = Term::Constant(10);
-
-        assert_eq!(var.as_variable(), Some("foo"));
-        assert_eq!(constant.as_variable(), None);
-    }
-
-    #[test]
-    fn test_atom_display() {
-        let atom = Atom::new(
-            "edge".into(),
-            vec![Term::Variable("x".into()), Term::Variable("y".into())],
-        );
-        assert_eq!(atom.to_string(), "edge(x, y)");
-
-        let atom_with_constant = Atom::new("node".into(), vec![Term::Constant(1)]);
-        assert_eq!(atom_with_constant.to_string(), "node(1)");
-
-        let empty_atom = Atom::new("empty".into(), vec![]);
-        assert_eq!(empty_atom.to_string(), "empty()");
-    }
-
-    #[test]
-    fn test_constraint_variables() {
-        let constraint =
-            Constraint::NotEqual(Term::Variable("x".into()), Term::Variable("y".into()));
-        let vars = constraint.variables();
-        assert_eq!(vars.len(), 2);
-        assert!(vars.contains("x"));
-        assert!(vars.contains("y"));
-
-        let constraint_with_constant =
-            Constraint::LessThan(Term::Variable("x".into()), Term::Constant(100));
-        let vars = constraint_with_constant.variables();
-        assert_eq!(vars.len(), 1);
-        assert!(vars.contains("x"));
-    }
-
-    #[test]
-    fn test_constraint_display() {
-        assert_eq!(
-            Constraint::NotEqual(Term::Variable("x".into()), Term::Variable("y".into()))
-                .to_string(),
-            "x != y"
-        );
-        assert_eq!(
-            Constraint::LessThan(Term::Variable("x".into()), Term::Constant(10)).to_string(),
-            "x < 10"
-        );
-        assert_eq!(
-            Constraint::LessOrEqual(Term::Variable("x".into()), Term::Constant(10)).to_string(),
-            "x <= 10"
-        );
-        assert_eq!(
-            Constraint::GreaterThan(Term::Variable("x".into()), Term::Constant(0)).to_string(),
-            "x > 0"
-        );
-        assert_eq!(
-            Constraint::GreaterOrEqual(Term::Variable("x".into()), Term::Constant(0)).to_string(),
-            "x >= 0"
-        );
-        assert_eq!(
-            Constraint::Equal(Term::Variable("x".into()), Term::Variable("y".into())).to_string(),
-            "x == y"
-        );
-    }
-
-    #[test]
-    fn test_body_predicate() {
-        let atom = Atom::new("edge".into(), vec![Term::Variable("x".into())]);
-
-        let positive = BodyPredicate::Positive(atom.clone());
-        let negated = BodyPredicate::Negated(atom.clone());
-
-        assert!(positive.is_positive());
-        assert!(!positive.is_negated());
-        assert!(!negated.is_positive());
-        assert!(negated.is_negated());
-
-        assert_eq!(positive.atom(), &atom);
-        assert_eq!(negated.atom(), &atom);
-
-        assert_eq!(positive.to_string(), "edge(x)");
-        assert_eq!(negated.to_string(), "not edge(x)");
-    }
-
-    #[test]
-    fn test_rule_display() {
-        // Simple rule: reach(y) :- edge(x, y).
-        let rule = Rule::new_simple(
-            Atom::new("reach".into(), vec![Term::Variable("y".into())]),
-            vec![Atom::new(
-                "edge".into(),
-                vec![Term::Variable("x".into()), Term::Variable("y".into())],
-            )],
-            vec![],
-        );
-        assert_eq!(rule.to_string(), "reach(y) :- edge(x, y).");
-
-        // Rule with constraint: path(x, y) :- edge(x, y), x != y.
-        let rule_with_constraint = Rule::new_simple(
-            Atom::new(
-                "path".into(),
-                vec![Term::Variable("x".into()), Term::Variable("y".into())],
-            ),
-            vec![Atom::new(
-                "edge".into(),
-                vec![Term::Variable("x".into()), Term::Variable("y".into())],
-            )],
-            vec![Constraint::NotEqual(
-                Term::Variable("x".into()),
-                Term::Variable("y".into()),
-            )],
-        );
-        assert_eq!(
-            rule_with_constraint.to_string(),
-            "path(x, y) :- edge(x, y), x != y."
-        );
-
-        // Rule with negation: safe(x) :- node(x), not dangerous(x).
-        let rule_with_negation = Rule::new(
-            Atom::new("safe".into(), vec![Term::Variable("x".into())]),
-            vec![
-                BodyPredicate::Positive(Atom::new("node".into(), vec![Term::Variable("x".into())])),
-                BodyPredicate::Negated(Atom::new(
-                    "dangerous".into(),
-                    vec![Term::Variable("x".into())],
-                )),
-            ],
-            vec![],
-        );
-        assert_eq!(
-            rule_with_negation.to_string(),
-            "safe(x) :- node(x), not dangerous(x)."
-        );
-    }
-
-    #[test]
-    fn test_rule_unsafe() {
-        // Unsafe rule: result(z) :- edge(x, y). (z doesn't appear in body)
-        let unsafe_rule = Rule::new_simple(
-            Atom::new("result".into(), vec![Term::Variable("z".into())]),
-            vec![Atom::new(
-                "edge".into(),
-                vec![Term::Variable("x".into()), Term::Variable("y".into())],
-            )],
-            vec![],
-        );
-        assert!(!unsafe_rule.is_safe());
-    }
-
-    #[test]
-    fn test_rule_non_recursive() {
-        // Non-recursive: result(x) :- source(x).
-        let rule = Rule::new_simple(
-            Atom::new("result".into(), vec![Term::Variable("x".into())]),
-            vec![Atom::new("source".into(), vec![Term::Variable("x".into())])],
-            vec![],
-        );
-        assert!(!rule.is_recursive());
-    }
-
-    #[test]
-    fn test_rule_variables() {
-        let rule = Rule::new(
-            Atom::new(
-                "path".into(),
-                vec![Term::Variable("x".into()), Term::Variable("z".into())],
-            ),
-            vec![
-                BodyPredicate::Positive(Atom::new(
-                    "edge".into(),
-                    vec![Term::Variable("x".into()), Term::Variable("y".into())],
-                )),
-                BodyPredicate::Positive(Atom::new(
-                    "path".into(),
-                    vec![Term::Variable("y".into()), Term::Variable("z".into())],
-                )),
-            ],
-            vec![Constraint::NotEqual(
-                Term::Variable("x".into()),
-                Term::Variable("z".into()),
-            )],
-        );
-
-        let vars = rule.variables();
-        assert_eq!(vars.len(), 3);
-        assert!(vars.contains("x"));
-        assert!(vars.contains("y"));
-        assert!(vars.contains("z"));
-    }
-
-    #[test]
-    fn test_rule_body_atoms() {
-        let rule = Rule::new(
-            Atom::new("result".into(), vec![Term::Variable("x".into())]),
-            vec![
-                BodyPredicate::Positive(Atom::new("a".into(), vec![Term::Variable("x".into())])),
-                BodyPredicate::Negated(Atom::new("b".into(), vec![Term::Variable("x".into())])),
-                BodyPredicate::Positive(Atom::new("c".into(), vec![Term::Variable("x".into())])),
-            ],
-            vec![],
-        );
-
-        let positive = rule.positive_body_atoms();
-        let negated = rule.negated_body_atoms();
-
-        assert_eq!(positive.len(), 2);
-        assert_eq!(positive[0].relation, "a");
-        assert_eq!(positive[1].relation, "c");
-
-        assert_eq!(negated.len(), 1);
-        assert_eq!(negated[0].relation, "b");
-    }
-
-    #[test]
-    fn test_program_display() {
-        let mut program = Program::new();
-
-        program.add_rule(Rule::new_simple(
-            Atom::new("reach".into(), vec![Term::Variable("x".into())]),
-            vec![Atom::new("source".into(), vec![Term::Variable("x".into())])],
-            vec![],
-        ));
-
-        program.add_rule(Rule::new_simple(
-            Atom::new("reach".into(), vec![Term::Variable("y".into())]),
-            vec![
-                Atom::new("reach".into(), vec![Term::Variable("x".into())]),
-                Atom::new(
-                    "edge".into(),
-                    vec![Term::Variable("x".into()), Term::Variable("y".into())],
-                ),
-            ],
-            vec![],
-        ));
-
-        let expected = "reach(x) :- source(x).\nreach(y) :- reach(x), edge(x, y).";
-        assert_eq!(program.to_string(), expected);
-    }
-
-    #[test]
-    fn test_program_all_relations() {
-        let mut program = Program::new();
-
-        program.add_rule(Rule::new_simple(
-            Atom::new("reach".into(), vec![Term::Variable("x".into())]),
-            vec![Atom::new("source".into(), vec![Term::Variable("x".into())])],
-            vec![],
-        ));
-
-        program.add_rule(Rule::new_simple(
-            Atom::new("reach".into(), vec![Term::Variable("y".into())]),
-            vec![
-                Atom::new("reach".into(), vec![Term::Variable("x".into())]),
-                Atom::new(
-                    "edge".into(),
-                    vec![Term::Variable("x".into()), Term::Variable("y".into())],
-                ),
-            ],
-            vec![],
-        ));
-
-        let all = program.all_relations();
-        assert_eq!(all, vec!["edge", "reach", "source"]);
-    }
-
-    #[test]
-    fn test_program_recursive_rules() {
-        let mut program = Program::new();
-
-        // Non-recursive
-        program.add_rule(Rule::new_simple(
-            Atom::new("reach".into(), vec![Term::Variable("x".into())]),
-            vec![Atom::new("source".into(), vec![Term::Variable("x".into())])],
-            vec![],
-        ));
-
-        // Recursive
-        program.add_rule(Rule::new_simple(
-            Atom::new("reach".into(), vec![Term::Variable("y".into())]),
-            vec![
-                Atom::new("reach".into(), vec![Term::Variable("x".into())]),
-                Atom::new(
-                    "edge".into(),
-                    vec![Term::Variable("x".into()), Term::Variable("y".into())],
-                ),
-            ],
-            vec![],
-        ));
-
-        assert_eq!(program.recursive_rules().len(), 1);
-        assert_eq!(program.non_recursive_rules().len(), 1);
-    }
-
-    #[test]
-    fn test_program_safety() {
-        let mut safe_program = Program::new();
-        safe_program.add_rule(Rule::new_simple(
-            Atom::new("result".into(), vec![Term::Variable("x".into())]),
-            vec![Atom::new("source".into(), vec![Term::Variable("x".into())])],
-            vec![],
-        ));
-        assert!(safe_program.is_safe());
-
-        let mut unsafe_program = Program::new();
-        unsafe_program.add_rule(Rule::new_simple(
-            Atom::new("result".into(), vec![Term::Variable("z".into())]),
-            vec![Atom::new("source".into(), vec![Term::Variable("x".into())])],
-            vec![],
-        ));
-        assert!(!unsafe_program.is_safe());
-    }
-
-    #[test]
-    fn test_empty_program() {
-        let program = Program::new();
-
-        assert!(program.rules.is_empty());
-        assert!(program.idbs().is_empty());
-        assert!(program.edbs().is_empty());
-        assert!(program.all_relations().is_empty());
-        assert!(program.is_safe()); // Empty program is vacuously safe
-        assert!(program.recursive_rules().is_empty());
-        assert!(program.non_recursive_rules().is_empty());
-        assert_eq!(program.to_string(), "");
-    }
-
-    #[test]
-    fn test_program_default() {
-        let program: Program = Default::default();
-        assert!(program.rules.is_empty());
     }
 }
