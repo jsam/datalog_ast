@@ -128,11 +128,15 @@ impl ArithExpr {
                     ArithOp::Sub => l - r,
                     ArithOp::Mul => l * r,
                     ArithOp::Div => {
-                        if r == 0 { return None; }
+                        if r == 0 {
+                            return None;
+                        }
                         l / r
                     }
                     ArithOp::Mod => {
-                        if r == 0 { return None; }
+                        if r == 0 {
+                            return None;
+                        }
                         l % r
                     }
                 })
@@ -167,15 +171,15 @@ impl AggregateFunc {
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Term {
-    Variable(String),     // e.g., "x", "y", "z"
-    Constant(i64),        // e.g., 42, 100
-    Placeholder,          // For parser - represents "_" in Datalog
-    /// Aggregation term: count<x>, sum<y>, min<z>, max<z>, avg<z>
-    Aggregate(AggregateFunc, String),  // (function, variable_name)
-    /// Arithmetic expression term: d + 1, x * y, etc.
+    Variable(String), // e.g., "x", "y", "z"
+    Constant(i64),    // e.g., 42, 100
+    Placeholder,      // For parser - represents "_" in Datalog
+    /// Aggregation term: `count<x>`, `sum<y>`, `min<z>`, `max<z>`, `avg<z>`
+    Aggregate(AggregateFunc, String), // (function, variable_name)
+    /// Arithmetic expression term: `d + 1`, `x * y`, etc.
     ///
     /// Used in head atoms for computed columns:
-    /// ```datalog
+    /// ```text
     /// dist(y, d+1) :- dist(x, d), edge(x, y).
     /// ```
     Arithmetic(ArithExpr),
@@ -282,10 +286,7 @@ impl Atom {
 
     /// Get all aggregate terms in this atom
     pub fn aggregates(&self) -> Vec<(&AggregateFunc, &str)> {
-        self.args
-            .iter()
-            .filter_map(|t| t.as_aggregate())
-            .collect()
+        self.args.iter().filter_map(|t| t.as_aggregate()).collect()
     }
 
     /// Get all arithmetic expressions in this atom
@@ -311,7 +312,7 @@ pub enum Constraint {
     LessOrEqual(Term, Term),
     GreaterThan(Term, Term),
     GreaterOrEqual(Term, Term),
-    Equal(Term, Term),  // For completeness
+    Equal(Term, Term), // For completeness
 }
 
 impl Constraint {
@@ -372,8 +373,8 @@ impl BodyPredicate {
 /// Represents a single Datalog rule
 ///
 /// # Examples
-/// ```
-/// // reach(y) :- reach(x), edge(x, y).
+/// ```text
+/// reach(y) :- reach(x), edge(x, y).
 /// ```
 #[derive(Debug, Clone)]
 pub struct Rule {
@@ -505,10 +506,7 @@ impl Program {
             }
         }
 
-        let mut edbs: Vec<String> = body_relations
-            .difference(&idb_set)
-            .cloned()
-            .collect();
+        let mut edbs: Vec<String> = body_relations.difference(&idb_set).cloned().collect();
 
         edbs.sort();
         edbs
@@ -642,7 +640,13 @@ mod tests {
 
     #[test]
     fn test_arith_op_roundtrip() {
-        for op in [ArithOp::Add, ArithOp::Sub, ArithOp::Mul, ArithOp::Div, ArithOp::Mod] {
+        for op in [
+            ArithOp::Add,
+            ArithOp::Sub,
+            ArithOp::Mul,
+            ArithOp::Div,
+            ArithOp::Mod,
+        ] {
             let s = op.as_str();
             assert_eq!(ArithOp::parse(s), Some(op));
         }
@@ -1116,10 +1120,7 @@ mod tests {
 
     #[test]
     fn test_constraint_less_than() {
-        let constraint = Constraint::LessThan(
-            Term::Variable("x".to_string()),
-            Term::Constant(10),
-        );
+        let constraint = Constraint::LessThan(Term::Variable("x".to_string()), Term::Constant(10));
 
         let vars = constraint.variables();
         assert_eq!(vars.len(), 1);
@@ -1141,10 +1142,8 @@ mod tests {
 
     #[test]
     fn test_constraint_greater_than() {
-        let constraint = Constraint::GreaterThan(
-            Term::Constant(100),
-            Term::Variable("x".to_string()),
-        );
+        let constraint =
+            Constraint::GreaterThan(Term::Constant(100), Term::Variable("x".to_string()));
 
         let vars = constraint.variables();
         assert_eq!(vars.len(), 1);
@@ -1164,10 +1163,7 @@ mod tests {
 
     #[test]
     fn test_constraint_equal() {
-        let constraint = Constraint::Equal(
-            Term::Variable("x".to_string()),
-            Term::Constant(5),
-        );
+        let constraint = Constraint::Equal(Term::Variable("x".to_string()), Term::Constant(5));
 
         let vars = constraint.variables();
         assert_eq!(vars.len(), 1);
